@@ -435,13 +435,21 @@ def build_html(all_data, out_path):
         # epub 列表
         books = d["books"]
         if books:
-            full = f'{d["name"]}作品集.epub'
-            vols = [b for b in books if b["file"] != full]
+            single_full = f'{d["name"]}单人作品大合集.epub'
+            uncensored_full = f'{d["name"]}无码作品大合集.epub'
+            vols = [b for b in books if b["file"] not in (single_full, uncensored_full)]
             P.append('<table><tr><th>书</th><th class="num">部数</th>'
                      '<th class="num">体积</th><th>作者</th><th>排序作者</th>'
                      '<th>封面</th></tr>')
-            for b in sorted(books, key=lambda x: x["file"] != full):
-                star = " ★" if b["file"] == full else ""
+            # 排序：单人大合集优先，其次无码大合集，其余按文件名
+            def sort_key(b):
+                if b["file"] == single_full:
+                    return (0, b["file"])
+                elif b["file"] == uncensored_full:
+                    return (1, b["file"])
+                return (2, b["file"])
+            for b in sorted(books, key=sort_key):
+                star = " ★" if b["file"] == single_full else (" ◆" if b["file"] == uncensored_full else "")
                 P.append(
                     f'<tr><td>{html.escape(b["file"][:-5])}{star}</td>'
                     f'<td class="num">{b["works"]}</td>'
@@ -451,16 +459,26 @@ def build_html(all_data, out_path):
                     f'<td class="{"ok" if b["cover"] else "no"}">'
                     f'{"✓" if b["cover"] else "✗"}</td></tr>')
             P.append('</table>')
-            vs = sum(b["works"] for b in vols)
-            fw = next((b["works"] for b in books if b["file"] == full), 0)
-            flag = ' class="ok">✓ 一致' if vs == fw else ' class="no">✗ 不符'
-            P.append(f'<div class="meta">分卷合计 <b>{vs}</b> · 大全集 <b>{fw}</b> '
-                     f'<span{flag}</span></div>')
-            # 遗漏预警：xhtml 文稿数 > 大全集部数，说明有新抓的还没进书
-            if d["xhtml"] > fw:
+            # 单人/无码大合集部数对比
+            single_works = next((b["works"] for b in books if b["file"] == single_full), 0)
+            uncensored_works = next((b["works"] for b in books if b["file"] == uncensored_full), 0)
+            single_xhtml = d["groups"].get("单人", 0)
+            uncensored_xhtml = d["groups"].get("无码", 0)
+            parts = []
+            if single_xhtml:
+                flag = ' class="ok">✓ 一致' if single_works == single_xhtml else ' class="no">✗ 不符'
+                parts.append(f'单人 <b>{single_works}</b> / xhtml <b>{single_xhtml}</b> <span{flag}</span>')
+            if uncensored_xhtml:
+                flag = ' class="ok">✓ 一致' if uncensored_works == uncensored_xhtml else ' class="no">✗ 不符'
+                parts.append(f'无码 <b>{uncensored_works}</b> / xhtml <b>{uncensored_xhtml}</b> <span{flag}</span>')
+            if parts:
+                P.append(f'<div class="meta">{" · ".join(parts)}</div>')
+            # 遗漏预警：xhtml 文稿数 > 大合集部数，说明有新抓的还没进书
+            total_in_books = single_works + uncensored_works
+            if d["xhtml"] > total_in_books:
                 P.append(f'<div class="meta"><span class="no">⚠ 遗漏预警：'
-                         f'xhtml 有 <b>{d["xhtml"]}</b> 个，大全集只收了 '
-                         f'<b>{fw}</b> 部，差 <b>{d["xhtml"] - fw}</b> 部'
+                         f'xhtml 有 <b>{d["xhtml"]}</b> 个，大合集只收了 '
+                         f'<b>{total_in_books}</b> 部，差 <b>{d["xhtml"] - total_in_books}</b> 部'
                          f'（可能仍在抓取，抓完需重建 epub）</span></div>')
         else:
             P.append('<div class="meta">尚未生成 epub</div>')
@@ -476,7 +494,7 @@ def build_html(all_data, out_path):
             P.append('</table></details>')
         P.append('</div>')
 
-    P.append('<div class="foot">★ = 大全集 · 部数来自 EPUB 目录（nav.xhtml）· '
+    P.append('<div class="foot">★ = 单人大合集 · ◆ = 无码大合集 · 部数来自 EPUB 目录（nav.xhtml）· '
              '体积为文件实际大小</div>')
     P.append('</body></html>')
 
