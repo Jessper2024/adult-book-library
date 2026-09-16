@@ -1,0 +1,24 @@
+# Ignore large files
+*.epub
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.zip
+*.mp4
+*.avi
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore downloaded data
+*/下载/*
+*/Downloads/*
+
+# Ignore logs
+*.log
+
+# Keep CSV and XHTML
+!./**/*.csv
+!./**/*.xhtml
