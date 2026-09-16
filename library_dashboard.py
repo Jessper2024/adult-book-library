@@ -25,6 +25,30 @@ import zipfile
 CAT_ORDER = ["单人", "双人", "多人", "无码", "日期未标注"]
 NAME_RE = re.compile(r"^(无码_)?(单人|双人|多人)_(\d{4})年")
 
+# ---- 演员名映射：单一真相源 ----
+# 成品目录名 <-> 源站「演員」列写法 的别名集合。
+# 真值在 edge-batch-capture 的 rebuild_actor_csv.py::ACTORS（第三列 = 源站写法，
+# 如 京香Julia→JULIA、木下凛凛子→木下凛々子）。这里直接复用，绝不另抄一份，
+# 否则又会像之前那样两处漂移、看板再用目录名去匹配源站名而恒失配。
+# 新增 / 修正演员名只改 rebuild_actor_csv.py 一处即可，看板自动同步。
+ACTOR_VARIANTS = {}
+try:
+    import sys as _sys, os as _os
+    _skill_scripts = _os.path.expanduser(
+        "~/.workbuddy/skills/edge-batch-capture/scripts")
+    if _skill_scripts not in _sys.path:
+        _sys.path.insert(0, _skill_scripts)
+    from rebuild_actor_csv import ACTORS as _ACTORS
+    for _dst, _src, _tag in _ACTORS:
+        ACTOR_VARIANTS[_dst] = {_dst, _src, _tag}
+    del _sys, _os, _ACTORS, _dst, _src, _tag
+except Exception as _e:  # 兜底：skill 缺失时至少保住两个已知易错映射，看板不死
+    ACTOR_VARIANTS = {
+        "京香Julia": {"京香Julia", "京香julia", "JULIA"},
+        "木下凛凛子": {"木下凛凛子", "木下凛々子"},
+    }
+    print(f"[warn] 未能从 skill 加载 ACTORS 映射（{_e}），已用内置兜底映射")
+
 
 def human(n):
     """字节 → 人类可读"""
@@ -50,11 +74,19 @@ def scan_actor(actor_dir, actor):
     rows = read_csv_rows(main) if os.path.exists(main) else []
     d["csv_files"] = [(os.path.basename(c), len(read_csv_rows(c))) for c in csvs]
     d["csv_total"] = len(rows)
-    # 演员列分布（单人 = 演员本人）
+    # 演员列分布（单人 = 演员本人，但必须按源站写法匹配，不能用目录名）
+    # 目录名（京香Julia）与源站演員列（JULIA）拼写不同，直接 == 比较会恒失配 → 单人永远 0。
+    # 用 ACTOR_VARIANTS 把目录名展开成 {目录名, 源料目录名, 源站写法} 集合再匹配。
+    variants = ACTOR_VARIANTS.get(actor, {actor})
     cnt = collections.Counter()
     for r in rows:
         a = (r.get("演員") or "").strip()
-        cnt["单人" if a == actor else ("多人" if a == "多人" else a or "?")] += 1
+        if a == "多人":
+            cnt["多人"] += 1
+        elif a in variants:
+            cnt["单人"] += 1
+        else:
+            cnt[a or "?"] += 1
     d["csv_actor_split"] = cnt
 
     # ---- xhtml 文稿 ----
@@ -77,6 +109,8 @@ def scan_actor(actor_dir, actor):
         years["日期未标注" if y == "0000" else y] += 1
     d["groups"] = groups
     d["years"] = years
+    # 单人 xhtml 数（计划抓的子集，用于进度分母）
+    d["xhtml_single"] = groups.get("单人", 0)
 
     # ---- epub ----
     books = []
@@ -111,7 +145,12 @@ def scan_actor(actor_dir, actor):
 # 日志文件名 → 演员（进程已死时靠它认人）
 LOG_ACTOR = {"julia": "京香Julia", "kinoshita": "木下凛凛子",
              "natsumi": "北原夏美", "maki": "北条麻妃",
-             "hjmf": "北条麻妃", "nakamori": "中森玲子"}
+             "hjmf": "北条麻妃", "nakamori": "中森玲子",
+             "nagi": "凪ひかる", "tachibana": "橘エレナ",
+             "shiratori": "白鳥寿美礼"}
+# 演员目录名（日志文件名若直接含目录名，也可兜底认人）
+ACTOR_DISPLAY = ["中森玲子", "京香Julia", "凪ひかる", "北原夏美", "北条麻妃",
+                 "木下凛凛子", "橘エレナ", "白鳥寿美礼"]
 
 
 def scan_tasks():
@@ -139,7 +178,10 @@ def scan_tasks():
             }
 
     tasks = []
-    cands = sorted(set(glob.glob("/tmp/*_run*.log") + glob.glob("/tmp/hjmf_run.log")))
+    cands = sorted(set(
+        glob.glob("/tmp/*_run*.log") +
+        glob.glob("/tmp/hjmf_run.log") +
+        glob.glob(os.path.join(PROC_DIR, "*_run*.log"))))
     for log in cands:
         try:
             txt = open(log, encoding="utf-8", errors="replace").read()
@@ -158,7 +200,13 @@ def scan_tasks():
         rate = cur / max(1, (st.st_mtime - born) / 60) if cur else 0
         eta = (total - cur) / rate if rate > 0 and cur < total else 0
         stem = os.path.basename(log)[:-4]
-        guess = next((v for k, v in LOG_ACTOR.items() if k in stem), "(未知)")
+        guess = next((v for k, v in LOG_ACTOR.items() if k in stem), None)
+        if guess is None:
+            for nm in ACTOR_DISPLAY:
+                if nm in stem:
+                    guess = nm
+                    break
+        guess = guess or "(未知)"
         tasks.append({
             "log": os.path.basename(log),
             "actor": running.get(log, {}).get("dir") or guess,
@@ -176,6 +224,39 @@ def bar(pct, color="#7F77DD"):
     w = max(0, min(100, pct))
     return (f'<div class="bar"><div class="fill" style="width:{w:.1f}%;'
             f'background:{color}"></div></div>')
+
+
+# ---- 备份状态（外置 2T 盘） ----
+# 单一真相源：从 edge-batch-capture/paths.py 取备份根目录（与 CSV/抓取脚本一致）；
+# skill 缺失时兜底硬编码，看板不至于崩。
+try:
+    from paths import BACKUP_ROOT
+except Exception:
+    BACKUP_ROOT = "/Volumes/Jessper 2T 课程/05.Life/备份/Epub备份_porn"
+# 处理过程（抓取日志）落外置盘 过程副本/（与备份规则一致）；
+# 同时兼容旧 /tmp 日志，过渡期不至于监控瞎掉。
+PROC_DIR = os.path.join(BACKUP_ROOT, "过程副本")
+
+
+def scan_backup(all_data):
+    """核对外置盘备份目录与本机 actor epub 的差异。"""
+    mounted = os.path.isdir(BACKUP_ROOT)
+    if not mounted:
+        return {"mounted": False, "root": BACKUP_ROOT}
+    bk_files = glob.glob(os.path.join(BACKUP_ROOT, "*", "*.epub"))
+    bk_set = {os.path.basename(f) for f in bk_files}
+    bk_bytes = sum(os.path.getsize(f) for f in bk_files)
+    missing, local_total = [], 0
+    for d in all_data:
+        for b in d["books"]:
+            local_total += 1
+            if b["file"] not in bk_set:
+                missing.append((d["name"], b["file"]))
+    times = [os.path.getmtime(f) for f in bk_files]
+    last = max(times) if times else 0
+    return {"mounted": True, "count": len(bk_files), "bytes": bk_bytes,
+            "missing": missing, "local_total": local_total,
+            "last": last, "root": BACKUP_ROOT}
 
 
 def build_html(all_data, out_path):
@@ -228,8 +309,8 @@ def build_html(all_data, out_path):
     if tasks:
         P.append('<div class="actor" style="border-color:#CECBF6">')
         P.append('<h2>后台任务监控</h2>')
-        P.append('<div class="meta">扫描 <code>/tmp/*_run*.log</code> + '
-                 '<code>pgrep</code> 判定存活</div>')
+        P.append('<div class="meta">扫描 <code>外置盘/过程副本/*_run*.log</code> '
+                 '（兼容 <code>/tmp</code>）+ <code>pgrep</code> 判定存活</div>')
         def rows(ts):
             out = []
             for t in ts:
@@ -264,6 +345,34 @@ def build_html(all_data, out_path):
             P.append(f'<details><summary>已完成任务（{len(finished)} 个）</summary>'
                      + head + rows(finished) + '</table></details>')
         P.append('</div>')
+
+    # ---- 备份状态（外置 2T 盘） ----
+    bk = scan_backup(all_data)
+    P.append('<div class="actor" style="border-color:#9FB7E8">')
+    P.append('<h2>备份状态（外置 2T 盘）</h2>')
+    if not bk["mounted"]:
+        P.append(f'<div class="meta"><span class="no">⚠ 外置盘未挂载，无法核对备份</span></div>')
+        P.append(f'<div class="meta">备份目录：<code>{html.escape(bk["root"])}</code></div>')
+    else:
+        pct = bk["count"] / bk["local_total"] * 100 if bk["local_total"] else 0
+        last = (dt.datetime.fromtimestamp(bk["last"]).strftime("%Y-%m-%d %H:%M")
+                if bk["last"] else "—")
+        P.append(f'<div class="meta">备份目录：<code>{html.escape(bk["root"])}</code></div>')
+        P.append(f'<div class="meta">已备份 <b>{bk["count"]}</b> / 本机 <b>{bk["local_total"]}</b> 本 '
+                 f'（{pct:.0f}%） · 备份体积 <b>{human(bk["bytes"])}</b> · 最后备份 {last}</div>')
+        P.append(bar(pct))
+        if bk["missing"]:
+            P.append(f'<div class="meta"><span class="no">⚠ 遗漏 {len(bk["missing"])} 本'
+                     f'（本机有、备份无）</span></div>')
+            P.append(f'<details><summary>查看遗漏清单（{len(bk["missing"])} 本）</summary>'
+                     f'<table>')
+            for nm, fn in bk["missing"]:
+                P.append(f'<tr><td>{html.escape(nm)}</td><td>{html.escape(fn)}</td></tr>')
+            P.append('</table></details>')
+        else:
+            P.append('<div class="meta"><span class="ok">✓ 本机 epub 已全部备份</span></div>')
+    P.append('</div>')
+
     P.append('<div class="cards">')
     for n, l in [(len(all_data), "演员"), (total_csv, "CSV 作品总数"),
                  (total_xhtml, "已生成 xhtml"), (total_books, "epub 本数"),
@@ -281,14 +390,37 @@ def build_html(all_data, out_path):
                  f'已抓 xhtml <b>{d["xhtml"]}</b> · '
                  f'epub <b>{len(d["books"])}</b> 本 / {human(d["epub_size"])} · {cov}</div>')
 
-        # 抓取进度
-        if d["csv_total"]:
-            sub = next((v for k, v in d["csv_actor_split"].items() if k == "单人"),
-                       d["csv_total"])
-            target = sub if d["xhtml"] <= sub else d["csv_total"]
-            pct = d["xhtml"] / target * 100 if target else 0
+        # CSV 演员分布（按源站写法统计，单人不再恒为 0，直接可见）
+        cas = d["csv_actor_split"]
+        if cas:
+            order = [k for k in ("单人", "双人", "多人") if k in cas] + \
+                    [k for k in cas if k not in ("单人", "双人", "多人")]
+            parts = []
+            for k in order:
+                v = cas[k]
+                if k in ("单人", "双人", "多人"):
+                    parts.append(f'{k} <b>{v}</b>')
+                else:
+                    parts.append(f'其他（{html.escape(k)}） <b>{v}</b>')
+            P.append('<div class="meta">CSV 演员分布：' + " · ".join(parts) + '</div>')
+
+        # 抓取进度（计划：单人）——分母用主 CSV 里的「单人」行数（计划抓的子集），
+        # 分子用「单人」xhtml 数；不再把不计划抓的多人算进分母，避免北条那种假 23%。
+        single_csv = d["csv_actor_split"].get("单人", 0)
+        if single_csv:
+            numer = d["xhtml_single"]
+            target = single_csv
+            pct = min(100.0, numer / target * 100) if target else 0
             P.append(bar(pct))
-            P.append(f'<div class="meta">抓取进度 <b>{d["xhtml"]}</b> / {target} '
+            P.append(f'<div class="meta">抓取进度（计划：单人） <b>{numer}</b> / {target} '
+                     f'（{pct:.0f}%）</div>')
+        elif d["csv_total"]:
+            # 主 CSV 无「单人」行时的兜底（理论不会触发）
+            numer = d["xhtml"]
+            target = d["csv_total"]
+            pct = min(100.0, numer / target * 100) if target else 0
+            P.append(bar(pct))
+            P.append(f'<div class="meta">抓取进度（整体） <b>{numer}</b> / {target} '
                      f'（{pct:.0f}%）</div>')
 
         # 分组 / 年份
