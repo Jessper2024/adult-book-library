@@ -19,6 +19,12 @@ Thumbs.db
 # Ignore logs
 *.log
 
-# Keep CSV and XHTML
+# Ignore process backups / early demos (2026-09-17)
+_datefix_backup_*/
+_*_demo.html
+
+# Ignore xhtml source tree (3.2 GB, protected by external-disk 源镜像 backup)
+*/xhtml 文稿/
+
+# Keep CSV
 !./**/*.csv
-!./**/*.xhtml
