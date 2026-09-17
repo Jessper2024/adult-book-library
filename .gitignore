@@ -22,6 +22,7 @@ Thumbs.db
 # Ignore process backups / early demos (2026-09-17)
 _datefix_backup_*/
 _*_demo.html
+_管理文档/数据看板_样式demo_*.html
 
 # Ignore xhtml source tree (3.2 GB, protected by external-disk 源镜像 backup)
 */xhtml 文稿/
