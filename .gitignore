@@ -27,5 +27,11 @@ _管理文档/数据看板_样式demo_*.html
 # Ignore xhtml source tree (3.2 GB, protected by external-disk 源镜像 backup)
 */xhtml 文稿/
 
+# Ignore source CSV tree (2026-09-21 方案A：源料下沉进演员目录)
+#   理由：①源料是分页全批重导，进 git 只会产生巨大 diff 噪音
+#         ②本仓库是 public，源料含详情页 URL 等全字段，不该上网
+#   备份改走外置盘：skills/edge-batch-capture/scripts/backup_source_mirror.py
+*/_源料/
+
 # Keep CSV
 !./**/*.csv
